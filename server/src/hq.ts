@@ -47,3 +47,20 @@ export async function hqBusPost<T = any>(path: string, payload: unknown): Promis
   if (!r.ok) throw new Error(`HQ bus ${path} → HTTP ${r.status}: ${(out as any)?.error || ''}`);
   return redact(out) as T;
 }
+
+/**
+ * The to-do board («De făcut» in HQ): add a ticket or change one. Signed as the colleague's own HQ account when
+ * they have one (razvan, edi), so the board shows who wrote it; otherwise as stefan with the name in the text.
+ * Only POST/PATCH on /api/hq/tickets: never DELETE, never archive, never groups.
+ */
+export async function hqTicketWrite<T = any>(method: 'POST' | 'PATCH', payload: Record<string, unknown>, account = 'stefan'): Promise<T> {
+  if ('archived' in payload || 'kind' in payload || 'fromTodoId' in payload) throw new Error('archiving, groups and conversions are not available through this server');
+  const acc = ['stefan', 'edi', 'razvan'].includes(account) ? account : 'stefan';
+  const r = await fetch(HQ_BASE + '/api/hq/tickets', {
+    method, headers: { Cookie: `dashboard_token=${cookie(acc)}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload), signal: AbortSignal.timeout(30_000),
+  });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`HQ to-do → HTTP ${r.status}: ${(out as any)?.error || ''}`);
+  return redact(out) as T;
+}

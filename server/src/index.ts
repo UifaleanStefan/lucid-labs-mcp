@@ -11,12 +11,13 @@ import './tools/money.js';
 import './tools/ads.js';
 import './tools/support.js';
 import './tools/agents.js';
+import './tools/todo.js';
 
 const VERSION = '1.0.0';
 const INSTRUCTIONS = `Lucid Labs team server: a live, read-only view of the whole business (the same data the orchestrator reads).
 Shops: song gift shops melodie (RO), manele (RO), regalo (IT), cadeau (FR), cancion (ES), songgift (EN), geschenk (DE), podarunek (PL), doro (GR), hediye (TR), tucancion (ES) and Magic Chapter (santa: the personalised Santa film, many countries).
 Start with: today (live numbers), kpis (any range), health (what is broken), live_queue (Magic Chapter factory), find_customer / order (one customer), sql (anything else; use schema first).
-Money: profit, stripe, invoices. Ads: meta_accounts, meta_insights, tiktok_report, google_ads. Support: support_threads, escalations. Company: experiments, reports, owner_relay, agent_threads, ask_agent (the only tool that writes: it opens a bus thread to an agent). hq = any HQ dashboard screen.
+Money: profit, stripe, invoices. Ads: meta_accounts, meta_insights, tiktok_report, google_ads. Support: support_threads, escalations. Company: experiments, reports, owner_relay, agent_threads, ask_agent (opens a bus thread to an agent), todo_list / todo_add / todo_update (the company to-do board «De făcut»: add tasks, change status; the only other writes). hq = any HQ dashboard screen.
 Rules of thumb: money amounts in the databases are minor units (cents/bani) in the row's currency; DB timestamps are UTC; a Romanian day starts 22:00 UTC (winter). "Paid" = paid column set. Every call is logged with your name.`;
 
 function buildServer(person: string, ip: string): McpServer {
