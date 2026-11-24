@@ -107,7 +107,10 @@ Things to know when reading numbers:
 | `reports` | The orchestrator's written reports and plans (synced from `D:/lucid-ops` every 15 min): list, read, search | `reports(action: "search", query: "Black Friday")` |
 | `owner_relay` | Questions the agents are waiting on Ștefan for | |
 | `agent_threads` | The agent bus: threads (list / one in full) and the agent roster | `agent_threads(agents: true)` |
-| `ask_agent` | Open a bus thread to an agent (or the orchestrator). The only tool that writes | `ask_agent(agent: "suport.manager", title: "…", text: "…")` |
+| `ask_agent` | Open a bus thread to an agent (or the orchestrator) | `ask_agent(agent: "suport.manager", title: "…", text: "…")` |
+| `todo_list` | The company to-do board (HQ «De făcut»): tickets, status, who, due day | `todo_list(status: "todo", assignee: "razvan")` |
+| `todo_add` | Add a task to the board (lands in «De făcut», the team is notified) | `todo_add(title: "…", description: "…", priority: 2, assignee: "edi")` |
+| `todo_update` | Change a task: status backlog/todo/doing/done, priority, assignee, due day, steps | `todo_update(id: "…", status: "done")` |
 | `hq` | Any HQ dashboard screen as data (GET only) | `hq(path: "/api/hq/retention?from=2026-11-01&to=2026-11-22")` |
 
 **Databases (`sql` / `schema` sites):** `manele` (also HQ's own tables: ProfitSnapshot, GoogleAdsDay, Bus*,
