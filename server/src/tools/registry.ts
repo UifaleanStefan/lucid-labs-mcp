@@ -38,7 +38,7 @@ function countRows(d: unknown): number | undefined {
 }
 
 async function audit(person: string, name: string, args: unknown, ok: boolean, rows: number | undefined, ms: number, error: string | undefined, ip: string) {
-  const summary = redactString(JSON.stringify(redact(args) ?? {})).slice(0, 600);
+  const summary = redactString(JSON.stringify(redact(args) ?? {})).slice(0, 4000); // long enough to re-run a logged SQL query in an audit
   await appQuery('INSERT INTO audit_log (person, tool, args, ok, row_count, ms, error, ip) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
     [person, name, summary, ok, rows ?? null, ms, error ? error.slice(0, 500) : null, ip]).catch((e) => console.error(`[audit] write failed: ${e.message}`));
   console.log(`[call] ${person} ${name} ${ok ? 'ok' : 'ERR'} rows=${rows ?? '-'} ${ms}ms ${summary.slice(0, 160)}${error ? ' :: ' + error.slice(0, 160) : ''}`);
