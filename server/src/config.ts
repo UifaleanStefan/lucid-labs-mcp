@@ -96,4 +96,4 @@ export const TIKTOK_ADVERTISER = env('TT_ADVERTISER_ID', '7682865907017793552');
 export const TIKTOK_BRANDS = ['manele', 'melodie', 'regalo', 'cadeau', 'cancion', 'santa'];
 
 /** HQ bus agent roster is read live from HQ; this is only the display name of each team member. */
-export const PEOPLE: Record<string, string> = { adrian: 'Adrian', razvan: 'Răzvan', owner: 'Ștefan (owner test key)' };
+export const PEOPLE: Record<string, string> = { adrian: 'Adrian', razvan: 'Răzvan', edi: 'Edi', stefan: 'Ștefan', owner: 'Ștefan (owner test key)', team: 'a colleague (shared team key)' };

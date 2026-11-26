@@ -62,14 +62,16 @@ export function leave(person: string): void { inflight.set(person, Math.max(0, (
 
 /** Failed-auth limiter per IP (stops key guessing). */
 const badByIp = new Map<string, number[]>();
+export const BAD_AUTH_LIMIT = 30;
 export function badAuth(ip: string): boolean {
   const now = Date.now();
+  if (badByIp.size > 5000) for (const [k, v] of badByIp) if (!v.some((t) => now - t < 10 * 60_000)) badByIp.delete(k);
   const arr = (badByIp.get(ip) || []).filter((t) => now - t < 10 * 60_000);
   arr.push(now);
   badByIp.set(ip, arr);
-  return arr.length > 30;
+  return arr.length > BAD_AUTH_LIMIT;
 }
 export function ipBlocked(ip: string): boolean {
   const now = Date.now();
-  return ((badByIp.get(ip) || []).filter((t) => now - t < 10 * 60_000).length) > 30;
+  return ((badByIp.get(ip) || []).filter((t) => now - t < 10 * 60_000).length) > BAD_AUTH_LIMIT;
 }

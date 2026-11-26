@@ -5,6 +5,7 @@ import { FILES_DIR, SITES } from '../config.js';
 import { q, qSafe } from '../db.js';
 import { hqGet } from '../hq.js';
 import { DATE, dayRange, tool } from './registry.js';
+import { santaTestOrderSql, testEmailSql } from '../rules.js';
 
 const HQ_SITE_KEYS = 'manele, melodie, regalo, cadeau, cancion, songgift, geschenk, podarunek, doro, hediye, tucancion, santa (Magic Chapter RO), santa_it, santa_es, santa_fr, santa_de, santa_el, santa_pl, santa_hu, santa_bg, santa_hr, santa_sr, santa_cs, santa_nl, santa_pt, santa_sk, santa_sv, santa_fi, santa_uk, santa_tr';
 const W = ['orders', 'paidOrders', 'drafts', 'revenueNative', 'revenueEur', 'adsEur', 'metaEur', 'tiktokEur', 'googleEur', 'profitEur', 'roas', 'roasMeta', 'roasTiktok', 'roasGoogle', 'convPct', 'marginPct', 'breakEvenEur', 'stripeEur', 'sunoEur', 'openaiEur', 'infraEur'];
@@ -15,7 +16,8 @@ tool({
   title: 'Today, live: orders, revenue, ads, profit per site',
   description:
     'The real-time picture HQ shows on its first screen: today and yesterday (Romanian days) for the whole fleet and per site: orders, paid orders, drafts, revenue (native + EUR), ad spend (Meta/TikTok/Google, EUR), ROAS, conversion %, profit. ' +
-    'Also the pace vs the same hour yesterday, HQ alerts, and the operational queue counts (paid-undelivered, stuck generating, unfinished payments, missing invoices). Source: HQ /api/hq/fleet (ProfitSnapshot, refreshed ~every 10 min).',
+    'Also the pace vs the same hour yesterday, HQ alerts, and the operational queue counts (paid-undelivered, stuck generating, unfinished payments, missing invoices). Source: HQ /api/hq/fleet (ProfitSnapshot, refreshed ~every 10 min). ' +
+    'Revenue includes add-ons bought after payment, so it can be slightly above a raw SQL sum of "Order".amount; Magic Chapter test / simulated orders are excluded. revenueNative is in the site own currency (fleet totals: EUR).',
   input: { site: z.string().optional().describe(`optional, one HQ site key: ${HQ_SITE_KEYS}`) },
   run: async ({ site }) => {
     const f = await hqGet('/api/hq/fleet', 60_000);
@@ -44,7 +46,8 @@ tool({
   title: 'KPIs for any date range',
   description:
     'Orders, paid orders, drafts, revenue, ad spend per channel, ROAS, conversion %, margin and profit for a date range (Romanian days, inclusive), fleet total and per site, with the previous equal period for comparison. ' +
-    'Source: HQ /api/hq/fleet/range (built from the daily ProfitSnapshots). Default: the last 7 complete days.',
+    'Source: HQ /api/hq/fleet/range (built from the daily ProfitSnapshots). Default: the last 7 complete days. Revenue includes post-payment add-ons; test orders are excluded. ' +
+    'Magic Chapter is split by market: santa = Romania, santa_it, santa_pl … the other countries.',
   input: { from: DATE.optional(), to: DATE.optional(), site: z.string().optional().describe(`optional HQ site key: ${HQ_SITE_KEYS}`) },
   run: async ({ from, to, site }) => {
     const yesterday = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
@@ -112,16 +115,20 @@ tool({
           (SELECT j.state FROM render_jobs j WHERE j.order_id = o.id AND j.kind = 'film' ORDER BY j.created_at DESC LIMIT 1) AS job
         FROM "Order" o LEFT JOIN "Video" v ON v."orderId" = o.id
         WHERE o."paymentConfirmedAt" IS NOT NULL AND o."refundedAt" IS NULL AND o.status NOT IN ('completed') AND coalesce(v.status, '') <> 'ready'
-          AND (o."deliverAt" IS NULL OR o."deliverAt" <= (now() at time zone 'UTC'))
-          AND o."paymentConfirmedAt" < (now() at time zone 'UTC') - interval '60 minutes' AND o."stripeSessionId" <> 'simulated'
+          AND o."deliveredEmailSentAt" IS NULL AND (o."deliverAt" IS NULL OR o."deliverAt" <= (now() at time zone 'UTC'))
+          AND o."paymentConfirmedAt" < (now() at time zone 'UTC') - interval '60 minutes' AND NOT ${santaTestOrderSql('o')}
+          AND NOT EXISTS (SELECT 1 FROM "JourneyEvent" je WHERE je."orderId" = o.id AND je.kind = 'op_resolved')
         ORDER BY o."paymentConfirmedAt" LIMIT 200`),
       q('santa', `SELECT j.id, j.kind, j.state, j.order_id, j.demo_id, left(j.reason, 300) AS reason, j.attempts, j.created_at, j.finished_at
-        FROM render_jobs j WHERE j.state IN ('held','failed') AND j.created_at > (now() at time zone 'UTC') - make_interval(hours => $1)
+        FROM render_jobs j LEFT JOIN "Order" o ON o.id = j.order_id LEFT JOIN "DemoRequest" d ON d.id = j.demo_id
+        WHERE j.state IN ('held','failed') AND j.created_at > (now() at time zone 'UTC') - make_interval(hours => $1)
+          AND NOT (coalesce(${santaTestOrderSql('o')}, false) OR coalesce(d.stub, false) OR ${testEmailSql('d.email')})
         ORDER BY j.created_at DESC LIMIT 200`, [h]),
       q('santa', `SELECT id, status, lang, "createdAt", floor(extract(epoch FROM ((now() at time zone 'UTC') - "createdAt")) / 60)::int AS minutes, left(error, 200) AS error
-        FROM "DemoRequest" WHERE stub = false AND status NOT IN ('ready','failed','expired') AND "createdAt" < (now() at time zone 'UTC') - interval '20 minutes'
+        FROM "DemoRequest" WHERE stub = false AND NOT ${testEmailSql('email')} AND status NOT IN ('ready','failed','expired') AND "createdAt" < (now() at time zone 'UTC') - interval '20 minutes'
           AND "createdAt" > (now() at time zone 'UTC') - interval '3 days' ORDER BY "createdAt" LIMIT 100`),
-      q('santa', `SELECT "orderId", status, attempts, left(error, 200) AS error, "createdAt", "updatedAt" FROM "OrderCarol" WHERE status NOT IN ('ready','done','delivered','sent') ORDER BY "createdAt" DESC LIMIT 100`),
+      q('santa', `SELECT k."orderId", k.status, k.attempts, left(k.error, 200) AS error, k."createdAt", k."updatedAt" FROM "OrderCarol" k LEFT JOIN "Order" o ON o.id = k."orderId"
+        WHERE k.status NOT IN ('ready','done','delivered','sent','skipped') AND NOT coalesce(${santaTestOrderSql('o')}, false) ORDER BY k."createdAt" DESC LIMIT 100`),
       q('santa', `SELECT kind, count(*)::int AS n, round(avg(render_s))::int AS avg_render_s FROM render_jobs WHERE state = 'done' AND finished_at > (now() at time zone 'UTC') - interval '24 hours' GROUP BY 1`),
     ]);
     let songQueues: unknown = null;
@@ -132,7 +139,7 @@ tool({
         film_queue_by_state: states, running_or_queued: running, workers,
         late_films: late, held_or_failed_jobs: held, demos_stuck_over_20min: demos, carols_in_production: carols,
         done_last_24h: recentDone, song_shop_queues: songQueues,
-        notes: 'Late = paid > 60 min, not ready, delivery not deferred. HELD = the checks stopped a film (name, photo, map…) and the film doctor / a person must act. Times UTC.',
+        notes: 'Late = paid > 60 min, not ready, no delivery e-mail, delivery not deferred, not marked resolved. Our own test orders (simulated payments, qa+ / magic-chapter.com / example.com … addresses, stub demos) are left out of late, held, demos and carols, as HQ does. HELD = the checks stopped a film (name, photo, map…) and the film doctor / a person must act. Times UTC.',
       },
       rows: late.length + held.length,
     };

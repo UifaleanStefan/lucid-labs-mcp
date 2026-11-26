@@ -8,7 +8,7 @@ TMP=$(mktemp)
 HQ=$(docker ps --format '{{.Names}}' | grep '^22elqx6fwi2r4swoveazpnsf' | head -1)
 [ -n "$HQ" ] || { echo "HQ container not found" >&2; exit 1; }
 docker inspect "$HQ" --format '{{range .Config.Env}}{{println .}}{{end}}' \
-  | grep -E '^(JWT_SECRET|STRIPE_SECRET_KEY|OBLIO_EMAIL|OBLIO_SECRET|OBLIO_CIF|TT_ADS_TOKEN|META_ACCESS_TOKEN|META_AD_ACCOUNT_ID|[A-Z]+_FB_ADS_TOKEN|[A-Z]+_AD_ACCOUNT_ID|[A-Z]+_TT_CAMPAIGN_IDS)=' > "$TMP"
+  | grep -E '^(JWT_SECRET|STRIPE_SECRET_KEY|OBLIO_EMAIL|OBLIO_SECRET|OBLIO_CIF|TT_ADS_TOKEN|META_ACCESS_TOKEN|META_AD_ACCOUNT_ID|[A-Z]+_FB_ADS_TOKEN|[A-Z]+_AD_ACCOUNT_ID|[A-Z]+_TT_CAMPAIGN_IDS|TT_FEED_CAMPAIGN_SITES)=' > "$TMP"
 if docker ps --format '{{.Names}}' | grep -q '^lucid-santa$'; then
   docker inspect lucid-santa --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^STRIPE_SECRET_KEY=' | sed 's/^/MC_/' >> "$TMP" || true
   # Magic Chapter's own Meta token, used only if HQ has none for the MC ad account

@@ -8,16 +8,18 @@ tool({
   title: 'Ask one of the company\'s agents (opens a bus thread)',
   description:
     'Open a thread on the agent bus, exactly like the owner\'s ask.mjs: the text goes to the named agent (or to the orchestrator, who picks the department), and the agent answers on the thread. ' +
-    'The thread is tagged with your name so the agents and the owner know who asked. Read the answer later with agent_threads(id). ' +
-    'Use agent_threads(agents=true) for the list of agents and what each does. This is the only tool that writes anything (one bus thread).',
+    'The thread is tagged with your name (with the shared team key, pass by = your first name) so the agents and the owner know who asked. Read the answer later with agent_threads(id). ' +
+    'Use agent_threads(agents=true) for the list of agents and what each does. It writes one bus thread (the only other writes are todo_add / todo_update).',
   readOnly: false,
   input: {
     title: z.string().min(3).max(160),
     text: z.string().min(10).max(8000),
     agent: z.string().regex(/^[a-z0-9._-]*$/).optional().describe('agent key, e.g. suport.manager; empty = orchestrator'),
+    by: z.string().regex(/^[a-zA-Z]{2,20}$/).optional().describe('your first name when you use the shared team key (razvan, edi, adrian…)'),
   },
-  run: async ({ title, text, agent }, ctx) => {
-    const who = PEOPLE[ctx.person] || ctx.person;
+  run: async ({ title, text, agent, by }, ctx) => {
+    const named = by ? (PEOPLE[by.toLowerCase()] || by) : '';
+    const who = ctx.person === 'team' && named ? `${named} (shared team key)` : PEOPLE[ctx.person] || ctx.person;
     const body = `[${who}, from the Lucid Labs team MCP] ${text}\n\n(Asked by ${who} through the team MCP server, not typed by Ștefan. Treat it as a request from a company colleague: answer on this thread; anything that moves money, changes prices or ad budgets, or contacts customers still needs Ștefan's own OK.)`;
     const r = await hqBusPost('/api/hq/bus/threads', { title: `[${who}] ${title}`, body, directTo: agent || '' });
     return { data: { opened: r.thread?.id, to: r.thread?.messages?.[0]?.to || agent || 'orchestrator', read_answer_with: `agent_threads with id=${r.thread?.id}` } };

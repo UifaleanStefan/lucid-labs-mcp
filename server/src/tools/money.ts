@@ -3,6 +3,7 @@ import { env, SHOP_SITES } from '../config.js';
 import { qSafe } from '../db.js';
 import { hqGet } from '../hq.js';
 import { DATE, dayRange, tool } from './registry.js';
+import { inRoDays, santaTestOrderSql } from '../rules.js';
 
 // ── Stripe (read-only: GET requests only) ─────────────────────────────────
 const STRIPE_PATHS: Record<string, string> = {
@@ -121,9 +122,9 @@ tool({
   name: 'invoices',
   title: 'Invoices, accounting and OSS/VAT',
   description:
-    'Invoicing for a date range. source="db" (default): per shop, paid orders vs invoiced (Order.invoiceSeries/Number), with the paid orders that have NO invoice listed. ' +
+    'Invoicing for a date range (Romanian days). source="db" (default): per shop, paid orders vs invoiced (Order.invoiceSeries/Number), with the paid orders that have NO invoice listed. ' +
     'source="oblio": the invoices in Oblio for a series (MCRO, MCIT, MCFR, MCES, MCEN, MCGE, MAGIC, …; CIF 54838465), paged. ' +
-    'source="accounting": HQ\'s charged-vs-invoiced report per month. source="oss": HQ\'s OSS / VAT view (EU sales per country, VAT due). ' +
+    'source="accounting": HQ\'s charged-vs-invoiced report per calendar month (from = how far back, up to 24 months; to is ignored). source="oss": HQ\'s OSS / VAT view (EU sales per country, VAT due; no date filter). ' +
     'Read-only: nothing is issued, cancelled or sent.',
   input: {
     source: z.enum(['db', 'oblio', 'accounting', 'oss']).optional(),
@@ -135,8 +136,15 @@ tool({
   run: async ({ source, from, to, site, series, max }) => {
     const r = dayRange(from, to, 7);
     const src = source || 'db';
-    if (src === 'accounting') return { data: await hqGet(`/api/hq/accounting${site ? `?site=${encodeURIComponent(site)}` : ''}`, 90_000) };
-    if (src === 'oss') return { data: await hqGet('/api/hq/oss', 90_000) };
+    if (src === 'accounting') {
+      // HQ's accounting screen takes ?months=N (default 6, max 24) counted back from this month, not a date range.
+      const now = new Date();
+      const months = from ? Math.min(24, Math.max(1, (now.getUTCFullYear() - Number(from.slice(0, 4))) * 12 + (now.getUTCMonth() + 1 - Number(from.slice(5, 7))) + 1)) : 6;
+      const p = new URLSearchParams({ months: String(months) });
+      if (site) p.set('site', site);
+      return { data: { months_back: months, note: 'HQ accounting is per calendar month: the last months_back months up to now (from only chooses how many; to is ignored).', report: await hqGet(`/api/hq/accounting?${p}`, 90_000) } };
+    }
+    if (src === 'oss') return { data: { note: 'The HQ OSS / VAT view has no date filter: it always shows its own periods (from/to are ignored).', report: await hqGet('/api/hq/oss', 90_000) } };
     if (src === 'oblio') {
       if (!series) throw new Error('give a series for source=oblio (e.g. MCRO, MCIT, MCFR, MCES, MCEN, MCGE, MAGIC)');
       const cif = env('OBLIO_CIF', '54838465');
@@ -155,17 +163,18 @@ tool({
     if (!shops.length) throw new Error(`unknown shop "${site}"`);
     const per = await Promise.all(shops.map(async (s) => {
       const paid = `o."${s.paidCol}"`;
-      const real = s.kind === 'film' ? `AND o."stripeSessionId" <> 'simulated'` : '';
+      const real = s.kind === 'film' ? `AND NOT ${santaTestOrderSql('o')}` : '';
+      const inRange = inRoDays(paid, '$1', '$2');
       const email = s.kind === 'song-manele' ? 'o."deliveryEmail"' : 'o.email';
       const sum = await qSafe(s.key, `SELECT count(*)::int AS paid_orders, count(*) FILTER (WHERE o."invoiceNumber" IS NOT NULL AND o."invoiceNumber" <> '')::int AS invoiced,
           count(*) FILTER (WHERE o."invoiceIssuedAt" IS NOT NULL AND coalesce(o."invoiceNumber", '') = '')::int AS claimed_no_number,
           coalesce(sum(o.amount), 0)::bigint AS amount_minor, string_agg(DISTINCT o.currency, ',') AS currencies, string_agg(DISTINCT o."invoiceSeries", ',') AS series
-        FROM "Order" o WHERE ${paid} >= $1::date AND ${paid} < ($2::date + 1) AND o.amount > 0 ${real}`, [r.from, r.to]);
+        FROM "Order" o WHERE ${inRange} AND o.amount > 0 ${real}`, [r.from, r.to]);
       const missing = await qSafe(s.key, `SELECT o.id, ${email} AS email, o.amount, o.currency, ${paid} AS "paidAt", o."invoiceIssuedAt"
-        FROM "Order" o WHERE ${paid} >= $1::date AND ${paid} < ($2::date + 1) AND o.amount > 0 ${real} AND coalesce(o."invoiceNumber", '') = '' AND o."refundedAt" IS NULL
+        FROM "Order" o WHERE ${inRange} AND o.amount > 0 ${real} AND coalesce(o."invoiceNumber", '') = '' AND o."refundedAt" IS NULL
           AND ${paid} < (now() at time zone 'UTC') - interval '2 hours' ORDER BY ${paid} LIMIT 50`.replace('AND o."refundedAt" IS NULL', s.kind === 'song-manele' ? '' : 'AND o."refundedAt" IS NULL'), [r.from, r.to]);
       return { site: s.key, ...(sum.rows[0] || {}), missing_invoice_after_2h: missing.rows, error: sum.error || missing.error };
     }));
-    return { data: { from: r.from, to: r.to, note: 'UTC days on the paid column. amount_minor in the row currency. "claimed_no_number" usually already has an invoice in Oblio (find it by payment intent).', shops: per }, rows: per.length };
+    return { data: { from: r.from, to: r.to, note: 'Romanian days on the paid column (as HQ); Magic Chapter test orders left out. amount_minor in the row currency (a shop can mix currencies: see currencies). "claimed_no_number" usually already has an invoice in Oblio (find it by payment intent).', shops: per }, rows: per.length };
   },
 });

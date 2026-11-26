@@ -8,8 +8,9 @@ It is the same data the orchestrator reads.
 - **Server:** `https://mcp.159.195.252.107.nip.io/mcp` (Streamable HTTP, HTTPS)
 - **Access:** one personal key per person (`lk_…`). Ștefan gives you yours privately. Never paste it into a
   chat, a document, a screenshot or a repo.
-- **Read-only:** nothing can be changed, refunded, sent or deleted through it. The one exception is
-  `ask_agent`, which opens a thread for one of the company's agents (tagged with your name).
+- **Read-only:** nothing can be changed, refunded, sent or deleted through it. The exceptions are
+  `ask_agent`, which opens a thread for one of the company's agents (tagged with your name), and
+  `todo_add` / `todo_update` on the company to-do board (no delete, no archive).
 - **Logged:** every call is recorded with your name, the tool, a summary of the arguments, the row count and
   the time it took.
 
@@ -81,6 +82,9 @@ Things to know when reading numbers:
 - Ad accounts bill in **RON**. The ROAS you can defend is *our* revenue ÷ spend (`db_roas` in
   `meta_insights`), not the platform's own purchase value.
 - A tool error on one shop means "unknown for that shop", never "zero".
+- Test orders never count: on Magic Chapter add `"stripeSessionId" <> 'simulated'` and leave out our own
+  addresses (qa+…, …@magic-chapter.com, example.com). HQ revenue also includes add-ons bought after payment,
+  so a plain SQL sum of `"Order".amount` can be a little lower than `today` / `kpis`.
 
 ## The tools
 
@@ -98,7 +102,7 @@ Things to know when reading numbers:
 | `invoices` | Paid vs invoiced per shop (with the orders missing an invoice); Oblio invoices per series; HQ accounting; OSS / VAT view | `invoices(source: "oblio", series: "MCIT")`, `invoices(source: "oss")` |
 | `meta_accounts` | Every Meta ad account and whether it is readable right now | |
 | `meta_insights` | Meta ads per account / campaign / ad set / ad: spend, CPM, CTR, CPC, Meta purchases, and **our real revenue and ROAS** per ad / campaign | `meta_insights(account: "regalo", level: "ad", from: "2026-11-16")` |
-| `tiktok_report` | TikTok ads per campaign / ad group / ad (spend, CTR, CPM, Complete Payment value and ROAS) + TikTok-attributed DB revenue | `tiktok_report(brand: "santa")` |
+| `tiktok_report` | TikTok ads per campaign / ad from BOTH advertisers (the old song-shop one via the API, with Complete Payment value; and, since mid-November, the one every live campaign runs on, via HQ's Ads Manager copy) + spend per brand + TikTok-attributed DB revenue | `tiktok_report(brand: "santa")` |
 | `google_ads` | Google Ads per site and campaign (from the daily push into HQ) | |
 | `support_threads` | Support conversations: live Gmail inboxes (every shop, Magic Chapter, the company inbox), WhatsApp, Sofia chat / Messenger / Instagram | `support_threads(channel: "email", who: "a@b.com", days: 30)`, then `support_threads(channel: "email", inbox: "santa", thread: "<id>")` |
 | `escalations` | Support cases the bot could not finish (open by default), with notes and the owner-only flag | `escalations(brand: "regalo")` |

@@ -13,12 +13,12 @@ import './tools/support.js';
 import './tools/agents.js';
 import './tools/todo.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const INSTRUCTIONS = `Lucid Labs team server: a live, read-only view of the whole business (the same data the orchestrator reads).
 Shops: song gift shops melodie (RO), manele (RO), regalo (IT), cadeau (FR), cancion (ES), songgift (EN), geschenk (DE), podarunek (PL), doro (GR), hediye (TR), tucancion (ES) and Magic Chapter (santa: the personalised Santa film, many countries).
 Start with: today (live numbers), kpis (any range), health (what is broken), live_queue (Magic Chapter factory), find_customer / order (one customer), sql (anything else; use schema first).
 Money: profit, stripe, invoices. Ads: meta_accounts, meta_insights, tiktok_report, google_ads. Support: support_threads, escalations. Company: experiments, reports, owner_relay, agent_threads, ask_agent (opens a bus thread to an agent), todo_list / todo_add / todo_update (the company to-do board «De făcut»: add tasks, change status; the only other writes). hq = any HQ dashboard screen.
-Rules of thumb: money amounts in the databases are minor units (cents/bani) in the row's currency; DB timestamps are UTC; a Romanian day starts 22:00 UTC (winter). "Paid" = paid column set. Every call is logged with your name.`;
+Rules of thumb: money amounts in the databases are minor units (cents/bani) in the row's currency; DB timestamps are UTC; a Romanian day starts 22:00 UTC (winter). "Paid" = paid column set. Test orders never count: on santa add "stripeSessionId" <> 'simulated' and leave out our own addresses (qa+, @magic-chapter.com, example.com). HQ revenue includes add-ons bought after payment. TikTok runs on two advertisers (tiktok_report merges both). A tool error means UNKNOWN, never zero. Every call is logged with your name.`;
 
 function buildServer(person: string, ip: string): McpServer {
   const server = new McpServer({ name: 'lucid-labs', version: VERSION }, { instructions: INSTRUCTIONS });
@@ -28,7 +28,8 @@ function buildServer(person: string, ip: string): McpServer {
 
 const app = express();
 app.disable('x-powered-by');
-app.set('trust proxy', true);
+// Only the Traefik hop in front of us (Docker network) may set the client address; a client's own X-Forwarded-For is never trusted.
+app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 app.use(express.json({ limit: '2mb' }));
 
 app.get('/health', (_req, res) => { res.json({ ok: true, version: VERSION, tools: ALL.length }); });
@@ -59,7 +60,9 @@ app.post('/mcp', async (req: Request, res: Response) => {
 
 // Stateless server: no server-initiated stream, no sessions to delete.
 const notAllowed = (req: Request, res: Response) => {
-  if (!personForKey(req.headers.authorization)) { res.status(401).set('WWW-Authenticate', 'Bearer realm="lucid-labs-mcp"').json({ error: 'Unauthorized' }); return; }
+  const ip = clientIp(req);
+  if (ipBlocked(ip)) { res.status(429).json({ error: 'too many failed attempts; try again in 10 minutes' }); return; }
+  if (!personForKey(req.headers.authorization)) { badAuth(ip); res.status(401).set('WWW-Authenticate', 'Bearer realm="lucid-labs-mcp"').json({ error: 'Unauthorized' }); return; }
   res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed (stateless server: POST only)' }, id: null });
 };
 app.get('/mcp', notAllowed);

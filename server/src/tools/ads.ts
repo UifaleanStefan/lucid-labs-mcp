@@ -1,8 +1,10 @@
 import { z } from 'zod';
-import { env, META_ACCOUNTS, site as siteOf, TIKTOK_ADVERTISER } from '../config.js';
+import { env, META_ACCOUNTS, site as siteOf, TIKTOK_ADVERTISER, type Site } from '../config.js';
+import { aggregateFeed, parseCampaignSites, type FeedOut, type FeedRow } from '../tiktokFeed.js';
 import { q, qSafe } from '../db.js';
 import { hqGet } from '../hq.js';
 import { DATE, dayRange, tool } from './registry.js';
+import { inRoDays, santaTestOrderSql } from '../rules.js';
 
 const GRAPH = 'https://graph.facebook.com/v21.0';
 
@@ -109,7 +111,8 @@ tool({
       for (let i = 0; i < 10 && j.paging?.next; i++) {
         next = j.paging.next as string;
         const resp = await fetch(next, { signal: AbortSignal.timeout(60_000) });
-        j = await resp.json();
+        j = await resp.json().catch(() => ({}));
+        if (!resp.ok || j.error) throw new Error(`Meta insights page ${i + 2} for ${a.key}: ${j?.error?.message || `HTTP ${resp.status}`} (the answer would be incomplete)`);
         rows.push(...(j.data || []));
       }
       const slim = rows.map((x) => {
@@ -134,9 +137,9 @@ tool({
         const col = lvl === 'ad' ? s.contentCol! : (s.kind === 'song-manele' ? 'utmCampaign' : 'attributionUtmCampaign');
         const ids = [...new Set(slim.map((x) => String(lvl === 'ad' ? x.ad_id : x.campaign_id)))].filter(Boolean);
         if (ids.length) {
-          const real = s.kind === 'film' ? `AND "stripeSessionId" <> 'simulated'` : '';
+          const real = s.kind === 'film' ? `AND NOT ${santaTestOrderSql('"Order"')}` : '';
           const rev = await qSafe(s.key, `SELECT "${col}" AS k, count(*)::int AS n, currency, sum(amount)::bigint AS amt FROM "Order"
-            WHERE "${s.paidCol}" >= $1::date AND "${s.paidCol}" < ($2::date + 1) AND amount > 0 AND "${col}" = ANY($3) ${real} GROUP BY 1, 3`, [r.from, r.to, ids]);
+            WHERE ${inRoDays(`"${s.paidCol}"`, '$1', '$2')} AND amount > 0 AND "${col}" = ANY($3) ${real} GROUP BY 1, 3`, [r.from, r.to, ids]);
           const by = new Map<string, { n: number; ron: number }>();
           for (const row of rev.rows) {
             const cur = by.get(String(row.k)) || { n: 0, ron: 0 };
@@ -157,7 +160,7 @@ tool({
       return { account: a.key, id: a.id, name: a.name, currency: a.currency, total_spend: Math.round(totalSpend * 100) / 100, rows: slim };
     }));
     return {
-      data: { from: r.from, to: r.to, level: lvl, results, unavailable, notes: 'Spend in the account currency (RON). DB revenue converted to RON at today\'s rate (open.er-api.com, as HQ). Orders without the ad id in utm_content are not joined (no fake 0 for them at campaign level: see HQ ads/individual for coverage).' },
+      data: { from: r.from, to: r.to, level: lvl, results, unavailable, notes: 'Spend in the account currency (RON), days in the ad account\'s time zone. DB revenue = paid orders (amount > 0, test orders out) on the same Romanian days, converted to RON at today\'s rate (open.er-api.com, as HQ). Orders without the ad id in utm_content are not joined (no fake 0 for them at campaign level: see HQ ads/individual for coverage).' },
       rows: results.reduce((n, x) => n + x.rows.length, 0),
     };
   },
@@ -183,17 +186,32 @@ function brandOfCampaign(id: string): string {
   return '';
 }
 
+/** Can the Marketing API read the second advertiser yet? Asked at most once an hour (one tiny report call). */
+let mcApi: { at: number; ok: boolean; note: string } | null = null;
+async function mcApiStatus(day: string): Promise<{ ok: boolean; note: string }> {
+  if (mcApi && Date.now() - mcApi.at < 3600_000) return mcApi;
+  try {
+    await tt('/report/integrated/get/', { advertiser_id: MC_TT_ADVERTISER, report_type: 'BASIC', data_level: 'AUCTION_CAMPAIGN', dimensions: ['campaign_id'], metrics: ['spend'], start_date: day, end_date: day, page_size: 1 });
+    mcApi = { at: Date.now(), ok: true, note: `the API can read advertiser ${MC_TT_ADVERTISER} now: the server can switch it from the feed to the API` };
+  } catch (e) { mcApi = { at: Date.now(), ok: false, note: `TikTok API cannot read advertiser ${MC_TT_ADVERTISER} (${(e as Error).message.slice(0, 160)}): its numbers come from HQ's Ads Manager copy` }; }
+  return mcApi;
+}
+
+const TT_SITE_WHERE = (s: Site) => (s.kind === 'song-manele'
+  ? `(lower(coalesce("utmSource", '')) LIKE '%tiktok%' OR coalesce("ttclid", '') <> '')`
+  : `("attributionUtmSource" ILIKE '%tiktok%' OR coalesce("attributionTtclid", '') <> '')`);
+
 tool({
   name: 'tiktok_report',
   title: 'TikTok ads performance',
   description:
-    'TikTok Ads report for a date range: spend, impressions, clicks, CTR, CPM, CPC, conversions, Complete Payment count and value, Complete-Payment ROAS, per campaign (or adgroup / ad), optionally per day. ' +
-    `The song shops share one account (${TIKTOK_ADVERTISER}); filter by campaign_id or brand (manele, melodie, regalo, cadeau, cancion). ` +
-    'Magic Chapter runs on a separate account (SRL1108); its numbers come from HQ\'s TikTok feed table when the API cannot read that account. ' +
-    'Note: the account clock is UTC+2; TikTok\'s "purchase" metrics read 0 — the real ones are complete_payment*. Also returns DB revenue attributed to TikTok per shop.',
+    'TikTok Ads for a date range (Romanian days): spend, impressions, clicks, CTR, CPM, CPC, conversions, per campaign (or ad), optionally per day, with spend totals per brand and the DB revenue attributed to TikTok per shop. ' +
+    `TWO advertisers: the old song-shop one (${TIKTOK_ADVERTISER}, Marketing API: also Complete Payment count / value / ROAS) and, since mid-November 2026, ${MC_TT_ADVERTISER} (SRL1108), where ALL live campaigns run, the song shops' «… TT Purchase nov26» and Magic Chapter's. ` +
+    'The API cannot read the second one, so its rows come from HQ\'s copy of Ads Manager (table TtFeedRow, refreshed a few times a day; campaign and ad level only, no Complete Payment value). Both are merged here, as HQ does; each row says its source. ' +
+    'brand = manele | melodie | regalo | cadeau | cancion | santa (every Magic Chapter market). Spend in RON. TikTok\'s "purchase" metrics read 0 on the API; the real ones are complete_payment*.',
   input: {
     from: DATE.optional(), to: DATE.optional(),
-    level: z.enum(['campaign', 'adgroup', 'ad']).optional(),
+    level: z.enum(['campaign', 'adgroup', 'ad']).optional().describe('adgroup exists only on the API advertiser'),
     brand: z.enum(['manele', 'melodie', 'regalo', 'cadeau', 'cancion', 'santa']).optional(),
     campaign_id: z.string().regex(/^\d+$/).optional(),
     daily: z.boolean().optional(),
@@ -201,52 +219,76 @@ tool({
   run: async ({ from, to, level, brand, campaign_id, daily }) => {
     const r = dayRange(from, to, 7);
     const lvl = level || 'campaign';
-    if (brand === 'santa') {
-      let apiNote = '';
-      try {
-        await tt('/report/integrated/get/', { advertiser_id: MC_TT_ADVERTISER, report_type: 'BASIC', data_level: 'AUCTION_CAMPAIGN', dimensions: ['campaign_id'], metrics: ['spend'], start_date: r.from, end_date: r.from, page_size: 1 });
-        apiNote = 'the API can read this account now: ask the server maintainer to switch Magic Chapter to the API';
-      } catch (e) { apiNote = `TikTok API cannot read the Magic Chapter account ${MC_TT_ADVERTISER}: ${(e as Error).message}`; }
-      const rows = await q('manele', `SELECT day, level, "campaignId", "campaignName", "entityId", "adName", currency, spend, impressions, clicks, ctr, cpc, cpm, conversions, "costPerConversion", "fetchedAt"
-        FROM "TtFeedRow" WHERE day >= $1 AND day <= $2 ORDER BY day DESC, spend DESC LIMIT 1000`, [r.from, r.to]);
-      return { data: { from: r.from, to: r.to, advertiser: MC_TT_ADVERTISER, source: 'HQ TikTok feed (TtFeedRow, read from the Ads Manager UI for the Magic Chapter account, refreshed a few times a day)', api_status: apiNote, rows }, rows: rows.length };
-    }
-    const dataLevel = { campaign: 'AUCTION_CAMPAIGN', adgroup: 'AUCTION_ADGROUP', ad: 'AUCTION_AD' }[lvl];
-    const dimKey = { campaign: 'campaign_id', adgroup: 'adgroup_id', ad: 'ad_id' }[lvl];
-    const metrics = ['spend', 'impressions', 'clicks', 'ctr', 'cpm', 'cpc', 'conversion', 'cost_per_conversion', 'complete_payment', 'value_per_complete_payment', 'complete_payment_roas', 'total_complete_payment_rate',
-      'campaign_name', ...(lvl !== 'campaign' ? ['adgroup_name'] : []), ...(lvl === 'ad' ? ['ad_name'] : []), ...(lvl !== 'campaign' ? ['campaign_id'] : [])];
-    const campaigns = campaign_id ? [campaign_id] : brand ? env(`${brand.toUpperCase()}_TT_CAMPAIGN_IDS`).split(',').map((x) => x.trim()).filter(Boolean) : [];
-    if (brand && !campaigns.length) throw new Error(`no TikTok campaigns are mapped to ${brand}`);
-    const params: Record<string, unknown> = {
-      advertiser_id: TIKTOK_ADVERTISER, report_type: 'BASIC', data_level: dataLevel,
-      dimensions: daily ? [dimKey, 'stat_time_day'] : [dimKey], metrics, start_date: r.from, end_date: r.to, page_size: 1000,
-    };
-    if (campaigns.length) params.filtering = [{ field_name: 'campaign_ids', filter_type: 'IN', filter_value: JSON.stringify(campaigns) }];
-    const d = await tt('/report/integrated/get/', params);
-    const rows = (d.list || []).map((x: any) => {
-      const m = x.metrics || {};
-      const num = (k: string) => (m[k] === undefined || m[k] === '-' ? null : Number(m[k]));
-      const cid = m.campaign_id || x.dimensions?.campaign_id;
-      return {
-        ...x.dimensions, campaign_name: m.campaign_name, adgroup_name: m.adgroup_name, ad_name: m.ad_name, brand: brandOfCampaign(String(cid || '')) || null,
-        spend: num('spend'), impressions: num('impressions'), clicks: num('clicks'), ctr: num('ctr'), cpm: num('cpm'), cpc: num('cpc'),
-        conversions: num('conversion'), cost_per_conversion: num('cost_per_conversion'),
-        complete_payments: num('complete_payment'), complete_payment_value: num('total_complete_payment_rate'), value_per_complete_payment: num('value_per_complete_payment'), complete_payment_roas: num('complete_payment_roas'),
+    const errors: string[] = [];
+    // 1. the API advertiser (the song shops until mid-November)
+    let apiRows: any[] = [];
+    const apiCampaigns = campaign_id ? [campaign_id] : brand && brand !== 'santa' ? env(`${brand.toUpperCase()}_TT_CAMPAIGN_IDS`).split(',').map((x) => x.trim()).filter(Boolean) : [];
+    if (brand !== 'santa' && !(brand && !apiCampaigns.length)) {
+      const dataLevel = { campaign: 'AUCTION_CAMPAIGN', adgroup: 'AUCTION_ADGROUP', ad: 'AUCTION_AD' }[lvl];
+      const dimKey = { campaign: 'campaign_id', adgroup: 'adgroup_id', ad: 'ad_id' }[lvl];
+      const metrics = ['spend', 'impressions', 'clicks', 'ctr', 'cpm', 'cpc', 'conversion', 'cost_per_conversion', 'complete_payment', 'value_per_complete_payment', 'complete_payment_roas', 'total_complete_payment_rate',
+        'campaign_name', ...(lvl !== 'campaign' ? ['adgroup_name'] : []), ...(lvl === 'ad' ? ['ad_name'] : []), ...(lvl !== 'campaign' ? ['campaign_id'] : [])];
+      const params: Record<string, unknown> = {
+        advertiser_id: TIKTOK_ADVERTISER, report_type: 'BASIC', data_level: dataLevel,
+        dimensions: daily ? [dimKey, 'stat_time_day'] : [dimKey], metrics, start_date: r.from, end_date: r.to, page_size: 1000,
       };
-    }).filter((x: any) => (x.spend || 0) > 0 || (x.impressions || 0) > 0);
-    // DB revenue attributed to TikTok (playbook-ads-apis: utm_source tiktok or a ttclid), per shop, in RON
+      if (apiCampaigns.length) params.filtering = [{ field_name: 'campaign_ids', filter_type: 'IN', filter_value: JSON.stringify(apiCampaigns) }];
+      try {
+        const d = await tt('/report/integrated/get/', params);
+        apiRows = (d.list || []).map((x: any) => {
+          const m = x.metrics || {};
+          const num = (k: string) => (m[k] === undefined || m[k] === '-' ? null : Number(m[k]));
+          const cid = m.campaign_id || x.dimensions?.campaign_id;
+          return {
+            source: 'api', advertiser: TIKTOK_ADVERTISER, ...x.dimensions, campaign_name: m.campaign_name, adgroup_name: m.adgroup_name, ad_name: m.ad_name, brand: brandOfCampaign(String(cid || '')) || null,
+            spend: num('spend'), impressions: num('impressions'), clicks: num('clicks'), ctr: num('ctr'), cpm: num('cpm'), cpc: num('cpc'),
+            conversions: num('conversion'), cost_per_conversion: num('cost_per_conversion'),
+            complete_payments: num('complete_payment'), complete_payment_value: num('total_complete_payment_rate'), value_per_complete_payment: num('value_per_complete_payment'), complete_payment_roas: num('complete_payment_roas'),
+          };
+        }).filter((x: any) => (x.spend || 0) > 0 || (x.impressions || 0) > 0);
+      } catch (e) { errors.push(`API advertiser ${TIKTOK_ADVERTISER}: ${(e as Error).message} (its rows are UNKNOWN, not 0)`); }
+    }
+    // 2. the second advertiser, from HQ's Ads Manager copy
+    let feedRows: FeedOut[] = [];
+    let feedCopiedAt: unknown = null;
+    if (lvl !== 'adgroup') {
+      const map = parseCampaignSites(env('TT_FEED_CAMPAIGN_SITES'));
+      const raw = await qSafe('manele', `SELECT day, level, "campaignId", "campaignName", "entityId", "adName", "adgroupId", currency, spend, impressions, clicks, conversions, "advertiserId"
+        FROM "TtFeedRow" WHERE day >= $1 AND day <= $2 AND level = $3`, [r.from, r.to, lvl]);
+      if (raw.error) errors.push(`HQ TikTok feed: ${raw.error} (advertiser ${MC_TT_ADVERTISER} is UNKNOWN, not 0)`);
+      feedRows = aggregateFeed(raw.rows as unknown as FeedRow[], lvl as 'campaign' | 'ad', !!daily, map)
+        .filter((x) => (!brand || x.brand === brand) && (!campaign_id || x.campaign_id === campaign_id || campaign_id.endsWith(x.campaign_id)));
+      const [f] = (await qSafe('manele', `SELECT max("fetchedAt") AS at FROM "TtFeedRow"`)).rows;
+      feedCopiedAt = f?.at ?? null;
+    } else errors.push(`level=adgroup: advertiser ${MC_TT_ADVERTISER} (all live campaigns since mid-November) is only available at campaign / ad level`);
+    const rows = [...apiRows, ...feedRows];
+    const totals: Record<string, { spend_ron: number; rows: number }> = {};
+    for (const x of rows) {
+      const k = x.brand || 'unmapped';
+      const t = totals[k] || { spend_ron: 0, rows: 0 };
+      t.spend_ron = Math.round((t.spend_ron + (Number(x.spend) || 0)) * 100) / 100; t.rows++;
+      totals[k] = t;
+    }
+    // 3. DB revenue attributed to TikTok (utm_source tiktok or a ttclid), per shop, Romanian days, in RON
     const db: Record<string, unknown> = {};
-    for (const b of brand ? [brand] : TT_BRANDS) {
+    for (const b of brand ? [brand] : [...TT_BRANDS, 'santa']) {
       const s = siteOf(b);
-      const where = s.kind === 'song-manele'
-        ? `(lower("utmSource") LIKE '%tiktok%' OR coalesce("ttclid", '') <> '')`
-        : `("attributionUtmSource" ILIKE '%tiktok%' OR coalesce("attributionTtclid", '') <> '')`;
-      const res = await qSafe(b, `SELECT count(*)::int AS n, currency, sum(amount)::bigint AS amt FROM "Order" WHERE "${s.paidCol}" >= $1::date AND "${s.paidCol}" < ($2::date + 1) AND amount > 0 AND ${where} GROUP BY currency`, [r.from, r.to]);
+      const real = s.kind === 'film' ? `AND NOT ${santaTestOrderSql('"Order"')}` : '';
+      const res = await qSafe(b, `SELECT count(*)::int AS n, currency, sum(amount)::bigint AS amt FROM "Order" WHERE ${inRoDays(`"${s.paidCol}"`, '$1', '$2')} AND amount > 0 AND ${TT_SITE_WHERE(s)} ${real} GROUP BY currency`, [r.from, r.to]);
       let ron = 0, n = 0;
       for (const row of res.rows) { ron += await toRon(Number(row.amt), String(row.currency)); n += Number(row.n); }
       db[b] = res.error ? { error: res.error } : { paid_orders: n, revenue_ron: Math.round(ron * 100) / 100 };
     }
-    return { data: { from: r.from, to: r.to, advertiser: TIKTOK_ADVERTISER, level: lvl, currency: 'RON', rows, db_revenue_tiktok_attributed: db }, rows: rows.length };
+    const mc = await mcApiStatus(r.from);
+    return {
+      data: {
+        from: r.from, to: r.to, level: lvl, currency: 'RON', spend_by_brand: totals, rows, db_revenue_tiktok_attributed: db,
+        sources: { api: TIKTOK_ADVERTISER, feed: MC_TT_ADVERTISER, feed_copied_at: feedCopiedAt, second_advertiser_api: mc.note },
+        errors,
+        notes: 'Spend is gross (TikTok credits part of it back on the second advertiser). HQ\'s TikTok spend per site (today / kpis / profit) uses the same two sources. Feed days are Ads Manager days.',
+      },
+      rows: rows.length,
+    };
   },
 });
 

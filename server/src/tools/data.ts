@@ -3,6 +3,7 @@ import { LIMITS, SHOP_SITES, SITE_KEYS, SITES, site as siteOf } from '../config.
 import { q, qSafe, runSql } from '../db.js';
 import { hqGet } from '../hq.js';
 import { tool } from './registry.js';
+import { isTestEmail, santaTestOrderSql } from '../rules.js';
 
 const SITE_LIST = SITES.map((s) => `${s.key} (${s.label})`).join('; ');
 
@@ -16,7 +17,9 @@ tool({
     `Postgres with Prisma naming: quote mixed-case names, e.g. SELECT id, "paymentConfirmedAt" FROM "Order". ` +
     `Timestamps are UTC (columns are 'timestamp without time zone' holding UTC; the session runs in UTC; a Romanian day is [D-1 22:00, D 22:00) UTC in winter). ` +
     `Schema split: manele uses "paidAt" + "deliveryEmail" + utmSource/utmContent and the brief on "Song" (dedicatee); every other song shop uses "paymentConfirmedAt" + "email" + attributionUtm*/recipient on "Order"; "Order"."songId" -> "Song".id. ` +
-    `"Paid" = the paid column IS NOT NULL (not status='paid'). amount is in minor units (cents/bani) in "Order".currency. ` +
+    `"Paid" = the paid column IS NOT NULL (not status='paid'). amount is in minor units (cents/bani) in "Order".currency; one shop can hold several currencies (hediye: TRY and EUR; santa: RON, EUR, PLN, HUF, CZK, RSD, SEK), so sum per currency. ` +
+    `Test orders: on santa always add "stripeSessionId" <> 'simulated' (84 simulated payments, 1-12 Nov 2026) and leave out our own addresses (qa+…, …@magic-chapter.com, example.com, lucidlabsorg…), as HQ does; amount > 0 drops the free ones. ` +
+    `HQ revenue (today / kpis / profit) also counts add-ons bought after payment (AnalyticsEvent post_addon), so a plain sum of "Order".amount can be a little lower than HQ. ` +
     `manele also holds HQ tables (ProfitSnapshot, GoogleAdsDay, Bus*, HealthCheckResult, EmailLog for manele). santa = Magic Chapter (Order, Video, render_jobs, DemoRequest, OrderCarol, EmailSend). agent = support hub (EscalationCase, HandledEmail, WaMessage, ActionLog, IssueFix). ` +
     `Use the schema tool first if you are unsure of a column. Columns holding credentials or private page tokens come back as "[hidden]".`,
   input: {
@@ -69,11 +72,12 @@ const MANELE_SEARCH = `SELECT o.id, o."deliveryEmail" AS email, s.dedicatee AS r
   WHERE o.id = $3 OR o."deliveryEmail" ILIKE $1 OR s.dedicatee ILIKE $1 OR o."payerName" ILIKE $1
      OR ($2 <> '' AND regexp_replace(coalesce(o."waPhone", ''), '[^0-9]', '', 'g') LIKE $2)
   ORDER BY (o."paidAt" IS NOT NULL) DESC, o."createdAt" DESC LIMIT 25`;
-const SANTA_SEARCH = `SELECT o.id, o.email, o."leadEmail", o.language, o.market, o."childName", o."child2Name", o.kids, o."payerName", o."senderName", o."fromWho",
-    o.status, o.amount, o.currency, o."createdAt", o."paymentConfirmedAt" AS "paidAt", o."refundedAt", v.status AS "filmStatus"
+const SANTA_SEARCH = `SELECT o.id, o.email, o."leadEmail", o.language, o.market, o."childName", o."child2Name", o.kids, o."payerName", o."senderName", o."fromWho", o."waPhone",
+    ${santaTestOrderSql('o')} AS "testOrder", o.status, o.amount, o.currency, o."createdAt", o."paymentConfirmedAt" AS "paidAt", o."refundedAt", v.status AS "filmStatus"
   FROM "Order" o LEFT JOIN "Video" v ON v."orderId" = o.id
   WHERE o.id = $3 OR o.email ILIKE $1 OR o."leadEmail" ILIKE $1 OR o."childName" ILIKE $1 OR o."child2Name" ILIKE $1
      OR o."payerName" ILIKE $1 OR o."senderName" ILIKE $1 OR o."fromWho" ILIKE $1
+     OR ($2::text <> '' AND regexp_replace(coalesce(o."waPhone", ''), '[^0-9]', '', 'g') LIKE $2::text)
   ORDER BY (o."paymentConfirmedAt" IS NOT NULL) DESC, o."createdAt" DESC LIMIT 25`;
 
 tool({
@@ -113,7 +117,7 @@ tool({
         emails_handled: support[2].rows,
         hq_customer_summary: hq,
         errors: [...shops.map((s) => s.error), ...support.map((s) => s.error)].filter(Boolean),
-        note: 'amount is in minor units (cents/bani) of the row currency. An error on a shop means UNKNOWN for that shop, not "no order".',
+        note: 'amount is in minor units (cents/bani) of the row currency. Magic Chapter rows with testOrder=true are ours (simulated payment or a test address). An error on a shop means UNKNOWN for that shop, not "no order".',
       },
       rows: hits.reduce((n, s) => n + s.rows.length, 0),
     };
@@ -165,11 +169,12 @@ async function filmOrder(id: string) {
   const held = !!paidAt && !ready && (video?.status === 'failed' || job === 'held' || job === 'failed');
   const minutes = paidAt ? Math.floor((Date.now() - paidAt) / 60_000) : 0;
   const deliverLater = o.deliverAt && new Date(o.deliverAt).getTime() > Date.now();
-  const verdict = o.refundedAt ? 'REFUNDED' : !paidAt ? `NOT PAID (${o.status})` : ready ? 'FILM READY' : held ? 'HELD / FAILED: a person must look at it'
-    : deliverLater ? `PAID, delivery date chosen by the parent: ${o.deliverAt}` : minutes > 60 ? `LATE: paid ${minutes} min ago, not ready (promise: within 1 hour)` : `PAID, film being made (${minutes} min since payment)`;
+  const testOrder = o.stripeSessionId === 'simulated' || isTestEmail(o.email) || isTestEmail(o.leadEmail);
+  const verdict = (testOrder ? 'TEST ORDER (ours, not a customer): ' : '') + (o.refundedAt ? 'REFUNDED' : !paidAt ? `NOT PAID (${o.status})` : ready ? 'FILM READY' : held ? 'HELD / FAILED: a person must look at it'
+    : deliverLater ? `PAID, delivery date chosen by the parent: ${o.deliverAt}` : minutes > 60 ? `LATE: paid ${minutes} min ago, not ready (promise: within 1 hour)` : `PAID, film being made (${minutes} min since payment)`);
   return {
     site: 'santa', label: 'Magic Chapter (film)',
-    summary: { verdict, paid: !!paidAt, paidAt: o.paymentConfirmedAt || null, amount_minor: o.amount, currency: o.currency, language: o.language, market: o.market, children: [o.childName, o.child2Name].filter(Boolean).join(' + '), film: video?.status || null, queue: job || null, minutesSincePaid: minutes },
+    summary: { verdict, testOrder, paid: !!paidAt, paidAt: o.paymentConfirmedAt || null, amount_minor: o.amount, currency: o.currency, language: o.language, market: o.market, children: [o.childName, o.child2Name].filter(Boolean).join(' + '), film: video?.status || null, queue: job || null, minutesSincePaid: minutes },
     order: o, video: video || null, render_jobs: jobs, carol, emails: mails, fixes: fixes.rows, feedback: feedback.rows,
     note: 'The private film-page link is not returned (its access token is a secret). Film != song: film matters go to suport.manager on the bus.',
   };
@@ -196,7 +201,7 @@ tool({
       qSafe('agent', `SELECT ts, brand, kind, tool, left(note, 300) AS note, "sessionId" FROM "ActionLog" WHERE "orderRef" = $1 ORDER BY ts DESC LIMIT 40`, [id]),
       qSafe('agent', `SELECT "createdAt", brand, direction, kind, "msgType", status, source, left(body, 600) AS body, "errorTitle" FROM "WaMessage" WHERE "orderId" = $1 ORDER BY "createdAt" DESC LIMIT 40`, [id]),
       qSafe('agent', `SELECT brand, "createdAt", "deliveredAt", "messagesSent", rating, "ratedAt", "upsellState" FROM "WaOrderLink" WHERE "orderId" = $1`, [id]),
-      qSafe('agent', `SELECT "createdAt", brand, channel, category, status, left(summary, 300) AS summary, left(requested, 400) AS requested, "newOrderId", "followupAt" FROM "IssueFix" WHERE "orderRef" = $1 ORDER BY "createdAt" DESC LIMIT 20`, [id]),
+      qSafe('agent', `SELECT "createdAt", brand, channel, category, status, left(summary, 300) AS summary, left(requested::text, 400) AS requested, "newOrderId", "followupAt" FROM "IssueFix" WHERE "orderRef" = $1 ORDER BY "createdAt" DESC LIMIT 20`, [id]),
       qSafe('agent', `SELECT "createdAt", channel, left(summary, 500) AS summary FROM "CustomerMemory" WHERE "orderRef" = $1 ORDER BY "createdAt" DESC LIMIT 10`, [id]),
     ]);
     return {
